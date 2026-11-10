@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube 本地字幕",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "没有字幕时使用本机语音识别，支持英文、中文和双语字幕。",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvvFoZDfMpDQg7J7xSXbCWJEbzyzAJZKfansYKPFb8vMbbaspqCfuOFVPlNe0Fm7+jBqmc+RPBvo+UqIh8PoTQMjrtL98tghNCwhZK9ORbPy/kibcSxBrgoV1Z3QK2treVfhQ6n4pTF/yd/hyw2SKfl7+yUT3bNf1eYBWbRgKXm2SqzzGz1CTfawRqSwJ6cv///btyX02lGgCYtwHspACXygDjeYweX5gNR8BCMGGnp3YayvxjD1xMrRm86iqBp2n7Ob8dW/xji1K9Rk0R1uNIaU9JrigP67lzd4ni4xMvkNvYA7aBlZmrUhA2xTCcZ4b7ZBRMrKD+8QRaYhZI75rhQIDAQAB",

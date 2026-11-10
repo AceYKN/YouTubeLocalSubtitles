@@ -1,4 +1,4 @@
-import { captionsFromResponse } from './common';
+import { captionControlUnavailable, captionsFromResponse } from './common';
 
 const handle = 'ytls:' + crypto.randomUUID();
 let configured = false;
@@ -18,11 +18,13 @@ function poll() {
   try { response = player.getPlayerResponse?.() || (window as any).ytInitialPlayerResponse; tracks = player.getOption?.('captions', 'tracklist'); } catch { /* Unknown is safe. */ }
   const button = player.querySelector('.ytp-subtitles-button') as HTMLElement | null;
   let cc: boolean | null = null;
+  let unavailable = false;
   if (button) {
     const style = getComputedStyle(button);
-    cc = !(button.getAttribute('aria-disabled') === 'true' || button.hasAttribute('disabled') || /unavailable|不可用|无法使用/.test(button.getAttribute('aria-label') || '') || style.display === 'none' || style.visibility === 'hidden');
+    unavailable = captionControlUnavailable(button.getAttribute('aria-label') || '', button.getAttribute('aria-disabled') === 'true' || button.hasAttribute('disabled'));
+    cc = !(unavailable || style.display === 'none');
   }
-  let captions = captionsFromResponse(response, videoId, cc, tracks);
+  let captions = captionsFromResponse(response, videoId, cc, tracks, unavailable);
   const next = videoId + ':' + captions;
   if (next !== candidate) { candidate = next; candidateSince = performance.now(); }
   if (captions === 'absent' && performance.now() - candidateSince < 1800) captions = 'unknown';

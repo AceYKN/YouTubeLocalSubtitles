@@ -7,12 +7,24 @@ export interface PlayerState {
 export interface CaptureHandle { handle?: string; origin?: string }
 export interface HandleTrack extends MediaStreamTrack { getCaptureHandle?: () => CaptureHandle | null }
 
-export function captionsFromResponse(response: any, videoId: string, cc: boolean | null, tracks?: unknown): CaptionState {
+export function captionControlUnavailable(label: string, disabled: boolean): boolean {
+  return disabled || /unavailable|not available|不可用|无法使用|無法使用|无法提供|無法提供|没有字幕|沒有字幕|不提供字幕/i.test(label.normalize('NFKC'));
+}
+
+export function captionsFromResponse(response: any, videoId: string, cc: boolean | null, tracks?: unknown, unavailable = false): CaptionState {
   if (!videoId || response?.videoDetails?.videoId !== videoId || response?.playabilityStatus?.status !== 'OK') return 'unknown';
   const list = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-  if ((Array.isArray(list) && list.length > 0) || (Array.isArray(tracks) && tracks.length > 0)) return 'present';
+  // Advertised ASR tracks can be placeholders with an empty timedtext response.
+  // Explicit native unavailability is distinct from CC being toggled off or hidden.
+  if (unavailable) {
+    if (Array.isArray(tracks) && tracks.length > 0) return 'unknown';
+    return response?.streamingData ? 'absent' : 'unknown';
+  }
+  if (Array.isArray(list) && list.length > 0) return 'present';
   if (Array.isArray(list) && list.length === 0) return 'absent';
   if (cc === false && ((Array.isArray(tracks) && tracks.length === 0) || response?.streamingData)) return 'absent';
+  // getOption('captions', 'tracklist') can retain another video's tracks during
+  // SPA navigation. Its contents alone cannot establish current availability.
   return 'unknown';
 }
 

@@ -18,7 +18,7 @@ from server.config import ROOT, ASR_NAME, load_config
 os.environ['PLAYWRIGHT_BROWSERS_PATH']=str(ROOT/'runtime/browsers')
 FIXTURE='''<!doctype html><html><head><meta charset="utf-8"><title>YTLocal capture fixture</title><style>
 body{margin:0;background:#0c1018;color:white;font:16px system-ui}main{margin:50px auto;width:960px}#movie_player{width:960px;height:540px;position:relative;background:linear-gradient(130deg,#17283c,#0a101c);border-radius:14px;overflow:hidden}video{width:100%;height:100%}.title{position:absolute;top:50px;left:40px;font-size:32px;pointer-events:none}.sub{font-size:16px;color:#a3b4ca}</style></head><body><main><h2>Local subtitle integration fixture</h2><div id="movie_player"><video class="html5-main-video" controls loop src="/ytls-test.wav"></video><div class="title">Local speech recognition<br><span class="sub">Controlled audio fixture · English / 中文 / 双语</span></div><button class="ytp-subtitles-button" style="display:none">CC</button></div></main><script>
-window.testHasCaptions=false;window.addEventListener('message',e=>{if(e.data?.source==='ytls:player')window.lastPlayerState=e.data.state});const p=document.getElementById('movie_player');p.getPlayerResponse=()=>({videoDetails:{videoId:'ytls_fixture'},playabilityStatus:{status:'OK'},streamingData:{formats:[]},...(window.testHasCaptions?{captions:{playerCaptionsTracklistRenderer:{captionTracks:[{kind:'asr',languageCode:'en'}]}}}:{})});p.getOption=()=>window.testHasCaptions?[{languageCode:'en'}]:[];
+window.testHasCaptions=false;window.testNativeUnavailable=false;window.addEventListener('message',e=>{if(e.data?.source==='ytls:player')window.lastPlayerState=e.data.state});const p=document.getElementById('movie_player');p.getPlayerResponse=()=>({videoDetails:{videoId:'ytls_fixture'},playabilityStatus:{status:'OK'},streamingData:{formats:[]},...(window.testHasCaptions?{captions:{playerCaptionsTracklistRenderer:{captionTracks:[{kind:'asr',languageCode:'en'}]}}}:{})});p.getOption=()=>window.testHasCaptions&&!window.testNativeUnavailable?[{languageCode:'en'}]:[];
 </script></body></html>'''
 
 
@@ -154,6 +154,13 @@ async def main():
             await page.get_by_text('视频字幕：已有字幕，默认不识别',exact=True).wait_for(timeout=5000)
             await page.wait_for_function('!document.querySelector("#ytls-root")?.shadowRoot?.querySelector("#en")?.textContent',timeout=5000)
             report['checks'].append('native_caption_takeover_clears_local')
+            await page.evaluate("window.testNativeUnavailable=true;document.querySelector('.ytp-subtitles-button').setAttribute('aria-label','字幕無法使用')")
+            await page.get_by_text('视频字幕：无可用字幕',exact=True).wait_for(timeout=5000)
+            for _ in range(20):
+                await asyncio.sleep(.1)
+                if httpx.get(f'http://127.0.0.1:{config["port"]}/health',trust_env=False).json()['receiving_audio']:break
+            else:raise AssertionError('Unavailable advertised captions blocked local recognition')
+            report['checks'].append('advertised_unavailable_track_allows_local')
             await page.get_by_label('字幕显示方式').select_option('english')
             await page.get_by_role('button',name='停止本地字幕',exact=True).click()
             await page.get_by_role('button',name='开始本地字幕',exact=True).wait_for()
