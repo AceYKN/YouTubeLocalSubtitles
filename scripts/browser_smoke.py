@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 from server.config import ROOT, ASR_NAME, load_config
 
 os.environ['PLAYWRIGHT_BROWSERS_PATH']=str(ROOT/'runtime/browsers')
-FIXTURE='''<!doctype html><html><head><title>YTLocal capture fixture</title><style>
+FIXTURE='''<!doctype html><html><head><meta charset="utf-8"><title>YTLocal capture fixture</title><style>
 body{margin:0;background:#0c1018;color:white;font:16px system-ui}main{margin:50px auto;width:960px}#movie_player{width:960px;height:540px;position:relative;background:linear-gradient(130deg,#17283c,#0a101c);border-radius:14px;overflow:hidden}video{width:100%;height:100%}.title{position:absolute;top:50px;left:40px;font-size:32px;pointer-events:none}.sub{font-size:16px;color:#a3b4ca}</style></head><body><main><h2>Local subtitle integration fixture</h2><div id="movie_player"><video class="html5-main-video" controls loop src="/ytls-test.wav"></video><div class="title">Local speech recognition<br><span class="sub">Controlled audio fixture · English / 中文 / 双语</span></div><button class="ytp-subtitles-button" style="display:none">CC</button></div></main><script>
 window.testHasCaptions=false;window.addEventListener('message',e=>{if(e.data?.source==='ytls:player')window.lastPlayerState=e.data.state});const p=document.getElementById('movie_player');p.getPlayerResponse=()=>({videoDetails:{videoId:'ytls_fixture'},playabilityStatus:{status:'OK'},streamingData:{formats:[]},...(window.testHasCaptions?{captions:{playerCaptionsTracklistRenderer:{captionTracks:[{kind:'asr',languageCode:'en'}]}}}:{})});p.getOption=()=>window.testHasCaptions?[{languageCode:'en'}]:[];
 </script></body></html>'''
@@ -115,8 +115,11 @@ async def main():
             await page.wait_for_function('document.querySelector("#ytls-root")?.shadowRoot?.querySelector("#zh")?.textContent.length > 1',timeout=45000)
             report['first_bilingual_seconds']=round(time.monotonic()-started,2)
             report['checks'].append('real_local_translation')
+            await page.get_by_text('正在生成本地字幕',exact=True).wait_for(timeout=5000)
             folder=ROOT/'output/playwright';folder.mkdir(parents=True,exist_ok=True)
+            await page.get_by_role('button',name='本地字幕',exact=True).click()
             await page.screenshot(path=str(folder/'bilingual-fixture.png'))
+            await page.get_by_role('button',name='本地字幕',exact=True).click()
             await page.get_by_label('字幕显示方式').select_option('chinese')
             assert await page.locator('#ytls-root').locator('#en').is_hidden()
             await page.get_by_label('字幕显示方式').select_option('english')

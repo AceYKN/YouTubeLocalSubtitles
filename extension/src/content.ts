@@ -24,6 +24,7 @@ let forwardedFrames=0;
 
 const labels: Record<string,string> = {
   READY:'已连接，等待视频语音', RECOGNIZING:'正在识别', TRANSLATION_LOADING:'正在加载中文翻译模型，英文字幕可先显示',
+  TRANSLATION_READY:'正在生成本地字幕',
   MODE_CHANGED:'字幕模式已切换', MODEL_MISSING:'识别模型尚未就绪，请先运行模型安装脚本',
   TRANSLATION_MODEL_MISSING:'翻译模型尚未就绪，可先使用英文模式', ASR_FAILED:'识别失败，请查看本机服务诊断',
   TRANSLATION_FAILED:'翻译暂不可用，可切换英文模式', TRANSLATION_TIMEOUT:'翻译暂时跟不上，已跳过过期内容',

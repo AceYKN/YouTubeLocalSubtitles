@@ -219,6 +219,7 @@ class Session:
                     continue
                 event = {key: item[key] for key in ("session_id", "generation", "segment_id", "media_start", "media_end")}
                 await self.send({**event, "type": "caption.translation", "text": text, "language": "zh"})
+                await self.status("TRANSLATION_READY")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
