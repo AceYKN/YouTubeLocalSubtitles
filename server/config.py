@@ -8,6 +8,7 @@ import secrets
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+APP_VERSION = "0.2.0"
 ASR_NAME = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
 PORT = 18765
 TRANSLATION_PORT = 18766

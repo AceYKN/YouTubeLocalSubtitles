@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import re
 import time
 from collections import deque
@@ -30,6 +31,13 @@ class Session:
         self.history = deque(maxlen=2)
         self.mode_revision = 0
         self.last_caption = None
+        self.source = "live"
+        self.media_position = 0.0
+        self.position_at = time.monotonic()
+        self.playing = False
+        self.position_rate = 1.0
+        self.prefetch_cache = {}
+        self.replay_cache = False
         self.tasks = []
         self.metrics = {"frames": 0, "segments": 0, "asr_completed": 0, "peak": 0.0, "resets": 0, "generation": 0, "reset_reason": ""}
 
@@ -64,11 +72,16 @@ class Session:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", message.get("session_id", "")):
                 raise ValueError("Invalid session")
             self.engine.active = self
+            self.source = message.get("source", "live")
+            if self.source not in ("live", "prefetch"):
+                raise ValueError("Invalid source")
+            if self.source == "prefetch" and not re.fullmatch(r"[A-Za-z0-9_-]{11}", message["video_id"]):
+                raise ValueError("Invalid YouTube video")
             self.mode = message["mode"]
             self.session_id = message["session_id"]
             await self.reset(message)
             if not self.tasks:
-                self.tasks = [asyncio.create_task(self.asr_worker()), asyncio.create_task(self.mt_worker())]
+                self.tasks = [asyncio.create_task(self.prefetch_worker())] if self.source == "prefetch" else [asyncio.create_task(self.asr_worker()), asyncio.create_task(self.mt_worker())]
             await self.status("READY")
         elif kind == "session.reset":
             if self.engine.active is self:
@@ -78,6 +91,7 @@ class Session:
                 raise ValueError("Invalid mode")
             previous_mode = self.mode
             self.mode = message["mode"]
+            self.replay_cache = True
             if previous_mode == "english" or self.mode == "english":
                 self.mode_revision += 1
             if self.mode == "english":
@@ -89,6 +103,9 @@ class Session:
             await self.status("MODE_CHANGED")
         elif kind == "session.pause":
             if self.engine.active is self:
+                if self.source == "prefetch":
+                    self.playing = False
+                    return
                 self.accepting = False
                 if self.vad is not None and self.base_media is not None:
                     self.vad.flush()
@@ -97,14 +114,21 @@ class Session:
                 self.base_media = None
         elif kind == "session.resume":
             if self.engine.active is self and message.get("generation") == self.generation:
+                if self.source == "prefetch":
+                    self.playing = True
+                    return
                 self.active = True
                 self.accepting = True
                 self.base_media = None
                 self.vad = self.engine.make_vad()
+        elif kind == "session.position":
+            if self.source == "prefetch" and message.get("generation") == self.generation:
+                self.update_position(message)
         elif kind == "session.stop":
             self.active = False
             self.accepting = False
             self.clear()
+            self.prefetch_cache.clear()
             if self.engine.active is self:
                 self.engine.active = None
         else:
@@ -121,12 +145,131 @@ class Session:
         self.metrics["resets"] += 1
         self.metrics["generation"] = generation
         self.metrics["reset_reason"] = str(message.get("reason", "start"))[:32]
+        if self.video_id != video:
+            self.prefetch_cache.clear()
         self.video_id = video
-        self.active = message.get("active") is True
-        self.accepting = self.active
+        self.active = (message.get("eligible", message.get("active")) is True) if self.source == "prefetch" else message.get("active") is True
+        self.accepting = self.active and self.source == "live"
+        self.update_position(message)
+        self.replay_cache = True
         self.clear()
-        if self.active:
+        if self.accepting:
             self.vad = self.engine.make_vad()
+
+    def update_position(self, message):
+        position = message.get("media_time", self.media_position)
+        rate = message.get("rate", self.position_rate)
+        if not isinstance(position, (int, float)) or not math.isfinite(position) or position < 0:
+            raise ValueError("Invalid position")
+        if not isinstance(rate, (int, float)) or not math.isfinite(rate) or not 0.25 <= rate <= 4:
+            raise ValueError("Invalid rate")
+        self.media_position = float(position)
+        self.position_rate = float(rate)
+        self.playing = message.get("playing", message.get("active", self.playing)) is True
+        self.position_at = time.monotonic()
+
+    def position(self):
+        elapsed = min(2.0, time.monotonic() - self.position_at) if self.playing else 0
+        return self.media_position + elapsed * self.position_rate
+
+    async def emit_cached(self, entry):
+        if not self.active:
+            return
+        event = {key: entry[key] for key in ("segment_id", "media_start", "media_end")}
+        event.update(session_id=self.session_id, generation=self.generation, source="prefetch")
+        await self.send({**event, "type": "caption.source", "text": entry["text"], "language": "en"})
+        if entry.get("zh") and self.mode != "english":
+            await self.send({**event, "type": "caption.translation", "text": entry["zh"], "language": "zh"})
+
+    async def prefetch_worker(self):
+        from .media import AudioReader
+        reader = None
+        reader_video = ""
+        cursor = None
+        history = deque(maxlen=2)
+        worker_generation = 0
+        try:
+            while True:
+                if not self.active:
+                    await asyncio.sleep(0.2)
+                    continue
+                if reader_video != self.video_id:
+                    if reader:
+                        await asyncio.to_thread(reader.close)
+                    reader_video = self.video_id
+                    factory = self.engine.media_factory or AudioReader
+                    reader = factory(reader_video)
+                    cursor = None
+                    history.clear()
+                    await self.status("PREPARING_SYNC")
+                    preparations = [asyncio.to_thread(reader.open), self.engine.prepare()]
+                    if self.mode != "english":
+                        preparations.append(self.engine.translator.ensure_ready())
+                    await asyncio.gather(*preparations)
+                position = self.position()
+                if worker_generation != self.generation:
+                    worker_generation = self.generation
+                    cursor = None
+                if self.replay_cache:
+                    self.replay_cache = False
+                    for entry in list(self.prefetch_cache.values()):
+                        if position - 30 < entry["media_end"] and entry["media_start"] < position + 24:
+                            if self.mode != "english" and not entry.get("zh") and entry["media_end"] > position and entry["media_start"] < position + 8:
+                                entry["zh"] = await self.engine.translator.translate(entry["text"], list(history))
+                            await self.emit_cached(entry)
+                if cursor is None or cursor < position + 0.4 or cursor > position + 28:
+                    cursor = math.ceil((position + 4) / 4) * 4
+                if (reader.duration and cursor >= reader.duration) or cursor >= position + 20:
+                    await asyncio.sleep(0.25)
+                    continue
+                entry = self.prefetch_cache.get(cursor)
+                if entry is not None:
+                    if self.mode != "english" and not entry.get("zh"):
+                        entry["zh"] = await self.engine.translator.translate(entry["text"], list(history))
+                    await self.emit_cached(entry)
+                    cursor += 4
+                    continue
+                timestamp, samples = await asyncio.to_thread(reader.read, cursor, 4.0)
+                if self.video_id != reader_video or not self.active:
+                    continue
+                if len(samples) < 800:
+                    cursor += 4
+                    continue
+                result = await self.engine.recognize(samples)
+                if self.video_id != reader_video or not self.active:
+                    continue
+                self.metrics["asr_completed"] += 1
+                self.metrics["last_asr_seconds"] = result["inference_seconds"]
+                text = result["text"]
+                if not text:
+                    cursor += 4
+                    continue
+                self.segment_id += 1
+                entry = {"segment_id": self.segment_id, "media_start": timestamp,
+                         "media_end": timestamp + len(samples) / 16000, "text": text, "zh": ""}
+                self.prefetch_cache[cursor] = entry
+                if len(self.prefetch_cache) > 64:
+                    del self.prefetch_cache[next(iter(self.prefetch_cache))]
+                self.metrics["prefetch_cues"] = len(self.prefetch_cache)
+                self.metrics["lead_seconds"] = round(entry["media_start"] - self.position(), 2)
+                await self.emit_cached(entry)
+                if self.mode != "english":
+                    entry["zh"] = await self.engine.translator.translate(text, list(history))
+                    if self.video_id == reader_video and self.active:
+                        await self.emit_cached(entry)
+                history.append(text)
+                self.engine.last_error = None
+                await self.status("SYNC_READY")
+                cursor += 4
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.engine.last_error = {"component": "media_prefetch", "type": type(error).__name__}
+            # Never hide this failure by silently starting heavy screen capture.
+            await self.status("MEDIA_PREFETCH_FAILED")
+        finally:
+            if reader:
+                await asyncio.to_thread(reader.close)
 
     async def enqueue(self, queue, item):
         if queue.full():
@@ -231,6 +374,7 @@ class Session:
         self.active = False
         self.accepting = False
         self.clear()
+        self.prefetch_cache.clear()
         if self.engine.active is self:
             self.engine.active = None
         for task in self.tasks:

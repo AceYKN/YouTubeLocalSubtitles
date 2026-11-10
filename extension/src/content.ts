@@ -1,4 +1,5 @@
 import {makeAudioGraph, shouldRecognize, type HandleTrack, type Mode, type PlayerState} from './common';
+import {CaptionTimeline} from './timeline';
 
 let state: PlayerState | null = null;
 let previousState: PlayerState | null = null;
@@ -16,13 +17,17 @@ let graph: Awaited<ReturnType<typeof makeAudioGraph>> | null = null;
 let host: HTMLElement | null = null;
 let shadow: ShadowRoot | null = null;
 let statusText = '检测视频字幕…';
-let caption: {id:number;generation:number;en:string;zh:string;shown:number} | null = null;
+const timeline=new CaptionTimeline();
+let sourceMode:'prefetch'|'live'='prefetch';
+let lastPresentation='';
 let hideNativeStyle: HTMLStyleElement | null = null;
 let lastVideo = '';
 let audioFrames=0;
 let forwardedFrames=0;
 
 const labels: Record<string,string> = {
+  PREPARING_SYNC:'正在后台准备同步字幕，视频继续正常播放', SYNC_READY:'同步字幕已准备，将按视频时间显示',
+  MEDIA_PREFETCH_FAILED:'暂时无法提前读取这条视频的音轨，已停止处理；不会自动改成画面采集',
   READY:'已连接，等待视频语音', RECOGNIZING:'正在识别', TRANSLATION_LOADING:'正在加载中文翻译模型，英文字幕可先显示',
   TRANSLATION_READY:'正在生成本地字幕',
   MODE_CHANGED:'字幕模式已切换', MODEL_MISSING:'识别模型尚未就绪，请先运行模型安装脚本',
@@ -37,18 +42,20 @@ async function request(message: any): Promise<any> {
   return chrome.runtime.sendMessage({target:'background',...message});
 }
 function setStatus(text: string) { statusText=text; render(); }
+function eligibleState() {return !!state && !state.ad && (state.captions==='absent'||force);}
 function session() {
-  return {session_id:crypto.randomUUID(),video_id:state!.videoId,generation,mode,active:shouldRecognize(state,force),rate:state!.rate,media_time:state!.time};
+  return {session_id:crypto.randomUUID(),video_id:state!.videoId,generation,mode,source:sourceMode,eligible:eligibleState(),playing:!state!.paused&&!state!.ended&&state!.ready,active:shouldRecognize(state,force),rate:state!.rate,media_time:state!.time};
 }
-function clearCaption() { caption=null; renderCaption(); }
+function clearCaption() {renderCaption();}
 function reset(reason='manual') {
   generation++; sequence=0; clearCaption();
   active = capturing && shouldRecognize(state,force);
-  if (capturing && state) void request({type:'reset',state:{generation,video_id:state.videoId,active,rate:state.rate,media_time:state.time,reason}}).catch(() => stopLocal('扩展已重新加载，请刷新页面'));
+  if (capturing && state) void request({type:'reset',state:{generation,video_id:state.videoId,active,eligible:eligibleState(),playing:!state.paused&&!state.ended&&state.ready,rate:state.rate,media_time:state.time,reason}}).catch(() => stopLocal('扩展已重新加载，请刷新页面'));
   render();
 }
 async function stopLocal(reason='本地字幕已停止', notify=true) {
   capturing=false; starting=false; active=false; generation++; sequence=0;
+  timeline.clear();
   if (graph) { const old=graph; graph=null; await old.close().catch(() => undefined); }
   const old=stream; stream=null; old?.getTracks().forEach(track => track.stop());
   if (notify) await request({type:'stop'}).catch(() => undefined);
@@ -63,13 +70,22 @@ function eligible() {
   }
   return true;
 }
+async function startPrefetch() {
+  if(starting||capturing||!eligible())return;
+  sourceMode='prefetch';starting=true;generation++;timeline.clear();setStatus(labels.PREPARING_SYNC);
+  try {
+    const result=await request({type:'connect',session:session()});
+    if(!result?.ok)throw new Error(result?.error||'无法连接本机服务');
+    starting=false;capturing=true;reset('prefetch-ready');setStatus(labels.PREPARING_SYNC);
+  } catch(error) {await stopLocal((error as Error).message);}
+}
 async function startPageCapture() {
   if (starting || capturing || !eligible()) return;
-  starting=true; generation++; setStatus('请选择当前 YouTube 标签页，并开启共享音频');
+  sourceMode='live';starting=true; generation++; setStatus('请选择当前 YouTube 标签页，并开启共享音频');
   try {
     // Keep this invocation in the original click activation, before any awaited request.
     const captured = await navigator.mediaDevices.getDisplayMedia({
-      video:true, audio:{suppressLocalAudioPlayback:false} as any,
+      video:{frameRate:1,width:320,height:180}, audio:{suppressLocalAudioPlayback:false} as any,
       preferCurrentTab:true, selfBrowserSurface:'include', surfaceSwitching:'exclude',
     } as DisplayMediaStreamOptions);
     stream=captured;
@@ -77,7 +93,9 @@ async function startPageCapture() {
     const handle=track?.getCaptureHandle?.();
     if (!handle || handle.handle !== state?.handle || handle.origin !== location.origin) throw new Error('请选择当前 YouTube 标签页。无法核对共享目标时，可用 Alt+Shift+L 定向启动。');
     if (!captured.getAudioTracks().length) throw new Error('未获取音频，请选择当前标签页并勾选“共享标签页音频”');
-    captured.getTracks().forEach(t => t.addEventListener('ended', () => { if (capturing || starting) void stopLocal('Chrome 已停止共享'); }));
+    captured.getAudioTracks().forEach(t => t.addEventListener('ended', () => { if (capturing || starting) void stopLocal('Chrome 已停止共享'); }));
+    track.stop(); // The capture handle has been checked; keep only the audio source.
+    if(host)host.dataset.videoCapture='stopped';
     const result=await request({type:'connect',session:session()});
     if (!result?.ok) throw new Error(result?.error || '无法连接本机服务');
     capturing=true; active=shouldRecognize(state,force); sequence=0;
@@ -100,14 +118,25 @@ function renderCaption() {
   if (!shadow) return;
   const en=shadow.querySelector<HTMLElement>('#en')!;
   const zh=shadow.querySelector<HTMLElement>('#zh')!;
-  const fresh=caption && caption.generation===generation && performance.now()-caption.shown<8000;
-  en.textContent=fresh && mode!=='chinese'?caption!.en:'';
-  zh.textContent=fresh && mode!=='english'?(caption!.zh || (mode==='chinese'?'正在翻译…':'')):'';
-  en.hidden=!en.textContent; zh.hidden=!zh.textContent;
+  const video=document.querySelector<HTMLVideoElement>('video.html5-main-video');
+  const cue=capturing&&eligibleState()&&video?timeline.at(video.currentTime,sourceMode==='live'?2.5:0):null;
+  const english=cue&&mode!=='chinese'?cue.en:'';
+  const chinese=cue&&mode!=='english'?cue.zh:'';
+  if(host && host.dataset.cueId!==String(cue?.id||'')) {
+    host.dataset.cueId=String(cue?.id||'');host.dataset.cueStart=String(cue?.start??'');host.dataset.cueEnd=String(cue?.end??'');
+  }
+  if(en.textContent!==english)en.textContent=english;
+  if(zh.textContent!==chinese)zh.textContent=chinese;
+  if(en.hidden!==!english)en.hidden=!english;
+  if(zh.hidden!==!chinese)zh.hidden=!chinese;
 }
 function render() {
   if (!shadow) return;
+  const presentation=[statusText,mode,state?.captions,force,starting,capturing,active].join('|');
+  if(presentation===lastPresentation){renderCaption();return;}
+  lastPresentation=presentation;
   if(host){host.dataset.generation=String(generation);host.dataset.active=String(active);host.dataset.capturing=String(capturing);}
+  if(host)host.dataset.sourceMode=sourceMode;
   const status=shadow.querySelector<HTMLElement>('#status')!;
   status.textContent=statusText;
   shadow.querySelector<HTMLElement>('#native')!.textContent='视频字幕：'+({present:'已有字幕，默认不识别',absent:'无可用字幕',unknown:'正在检测 / 无法确定'}[state?.captions || 'unknown']);
@@ -143,14 +172,23 @@ function mount() {
   hideNativeStyle.disabled=true; document.documentElement.append(hideNativeStyle);
   const panel=shadow.querySelector<HTMLElement>('#panel')!;
   shadow.querySelector<HTMLButtonElement>('#toggle')!.onclick=()=>{panel.hidden=!panel.hidden;shadow!.querySelector('#toggle')!.setAttribute('aria-expanded',String(!panel.hidden));};
-  shadow.querySelector<HTMLButtonElement>('#start')!.onclick=()=>{if(capturing) void stopLocal(); else void startPageCapture();};
+  shadow.querySelector<HTMLButtonElement>('#start')!.onclick=()=>{if(capturing) void stopLocal(); else void startPrefetch();};
+  const compatibility=document.createElement('details');
+  compatibility.innerHTML='<summary style="cursor:pointer;margin-top:10px;font-size:12px">兼容方式</summary><button id="compat" style="width:100%;margin-top:8px;font-size:12px">兼容音频采集（字幕有延迟）</button>';
+  shadow.querySelector('#panel')!.append(compatibility);
+  compatibility.querySelector<HTMLButtonElement>('#compat')!.onclick=()=>{if(!capturing)void startPageCapture();};
   shadow.querySelector<HTMLButtonElement>('#setup')!.onclick=()=>{window.open('http://127.0.0.1:18765/setup','_blank','noopener');};
   shadow.querySelector<HTMLSelectElement>('#mode')!.onchange=event=>{
     mode=(event.target as HTMLSelectElement).value as Mode;
     void request({type:'mode',mode}).catch(()=>undefined); render();
   };
   shadow.querySelector<HTMLInputElement>('#force')!.onchange=event=>{force=(event.target as HTMLInputElement).checked;reset();};
-  render();
+  lastPresentation='';render();
+  const video=player.querySelector<HTMLVideoElement>('video.html5-main-video');
+  if(video){
+    const tick=()=>{if(!host?.isConnected||host.parentElement!==player)return;renderCaption();video.requestVideoFrameCallback(tick);};
+    video.requestVideoFrameCallback(tick);
+  }
 }
 function playerUpdate(next: PlayerState) {
   if (!['present','absent','unknown'].includes(next.captions) || typeof next.videoId!=='string' || !Number.isFinite(next.time) || !Number.isFinite(next.rate)) return;
@@ -158,7 +196,7 @@ function playerUpdate(next: PlayerState) {
   const old=previousState;
   state=next;
   const changedVideo=next.videoId!==lastVideo;
-  if (changedVideo) {force=false;lastVideo=next.videoId;}
+  if (changedVideo) {force=false;lastVideo=next.videoId;timeline.clear();}
   const nextActive=capturing && shouldRecognize(next,force);
   const discontinuous=old && old.videoId===next.videoId && !old.paused && !next.paused && Math.abs(next.time-old.time-(wall-previousWall)/1000*old.rate)>0.9;
   const structural=changedVideo || next.rate!==old?.rate || next.seeking!==old?.seeking || next.ad!==old?.ad || next.captions!==old?.captions || discontinuous;
@@ -185,21 +223,24 @@ chrome.runtime.onMessage.addListener((message,_sender,reply)=>{
       setStatus(labels[event.code] || event.detail || event.code);
       if(event.code==='SESSION_BUSY') void stopLocal(labels.SESSION_BUSY);
     }
-    if(event?.generation===generation && event.type==='caption.source' && typeof event.text==='string') {
-      caption={id:event.segment_id,generation,en:event.text.slice(0,1500),zh:'',shown:performance.now()};renderCaption();
-    }
-    if(event?.generation===generation && event.type==='caption.translation' && caption && caption.id===event.segment_id && typeof event.text==='string') {caption.zh=event.text.slice(0,1500);renderCaption();}
+    if(event?.generation===generation && (event.type==='caption.source'||event.type==='caption.translation')) {timeline.put(event);renderCaption();}
     return;
   }
   if(message.type==='prepare-tab-capture') {
     if(capturing) {void stopLocal();reply({ok:true,stop:true});return;}
     if(!eligible()) {shadow?.querySelector<HTMLElement>('#panel')?.removeAttribute('hidden');reply({ok:false});return;}
-    generation++;starting=true;reply({ok:true,session:session()});return;
+    sourceMode='live';generation++;starting=true;reply({ok:true,session:session()});return;
   }
   if(message.type==='tab-capture-started') {starting=false;capturing=true;reset('capture-ready');setStatus('正在等待语音…');}
 });
 void request({type:'settings'}).then(config=>{paired=!!config.paired;mode=config.mode || 'bilingual';render();}).catch(()=>setStatus('扩展已更新，请刷新页面'));
 setInterval(mount,600);
-setInterval(renderCaption,1000);
+setInterval(()=>{
+  renderCaption();
+  if(capturing&&sourceMode==='prefetch'&&state){
+    const video=document.querySelector<HTMLVideoElement>('video.html5-main-video');
+    if(video)void request({type:'position',state:{generation,media_time:video.currentTime,rate:video.playbackRate,playing:!video.paused&&!video.ended&&video.readyState>=3}}).catch(()=>undefined);
+  }
+},500);
 window.addEventListener('pagehide',()=>{void stopLocal('已离开视频页面');});
 mount();

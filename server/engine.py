@@ -17,15 +17,17 @@ from .config import ASR_NAME, ROOT
 
 
 class Engine:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, media_factory=None):
         self.config = config
         self.recognizer = None
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
         self.lock = threading.RLock()
         self.last_used = time.monotonic()
         self.state = "idle"
+        self.last_error = None
         self.active = None
         self.translator = Translator(config)
+        self.media_factory = media_factory
 
     def present(self) -> bool:
         folder = ROOT / "models" / ASR_NAME
@@ -44,7 +46,7 @@ class Engine:
                 encoder=str(folder / "encoder.int8.onnx"),
                 decoder=str(folder / "decoder.int8.onnx"),
                 tokenizer=str(folder / "tokenizer"),
-                num_threads=self.config["threads"], max_new_tokens=128, provider="cpu",
+                num_threads=min(3, self.config.get("threads", 3)), max_new_tokens=128, provider="cpu",
             )
             self.state = "ready"
 
@@ -64,6 +66,12 @@ class Engine:
 
     async def recognize(self, samples: np.ndarray) -> dict:
         return await asyncio.get_running_loop().run_in_executor(self.pool, self.transcribe, samples)
+
+    async def prepare(self):
+        def load():
+            with self.lock:
+                self._load()
+        await asyncio.get_running_loop().run_in_executor(self.pool, load)
 
     def make_vad(self):
         if not (ROOT / "models/silero_vad.onnx").exists():
@@ -133,7 +141,8 @@ class Translator:
                 env = dict(os.environ, LLAMA_API_KEY=self.config["token"])
                 self.process = await asyncio.create_subprocess_exec(
                     str(executable), "-m", str(ROOT / "models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"),
-                    "-c", "4096", "-ngl", "99", "-np", "1", "--host", "127.0.0.1",
+                    "-c", "2048", "-ngl", "99", "-np", "1", "-t", "2", "-tb", "2",
+                    "-b", "128", "-ub", "64", "--poll", "0", "--prio", "-1", "--host", "127.0.0.1",
                     "--port", str(self.config["translation_port"]),
                     cwd=executable.parent, stdout=self.log, stderr=self.log, env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,

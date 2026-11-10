@@ -3,6 +3,7 @@ import { captionControlUnavailable, captionsFromResponse } from './common';
 const handle = 'ytls:' + crypto.randomUUID();
 let configured = false;
 let candidate = ''; let candidateSince = 0;
+let metadataKey='';let metadataUntil=0;let response:any;let tracks:unknown;
 function poll() {
   if (!configured && navigator.mediaDevices && 'setCaptureHandleConfig' in navigator.mediaDevices) {
     try {
@@ -14,9 +15,13 @@ function poll() {
   const video = document.querySelector<HTMLVideoElement>('video.html5-main-video');
   const player = document.getElementById('movie_player') as any;
   if (!video || !player || !videoId) return;
-  let response: any; let tracks: unknown;
-  try { response = player.getPlayerResponse?.() || (window as any).ytInitialPlayerResponse; tracks = player.getOption?.('captions', 'tracklist'); } catch { /* Unknown is safe. */ }
   const button = player.querySelector('.ytp-subtitles-button') as HTMLElement | null;
+  const key=videoId+':'+button?.getAttribute('aria-label')+':'+button?.getAttribute('aria-disabled');
+  if(key!==metadataKey||performance.now()>=metadataUntil){
+    metadataKey=key;metadataUntil=performance.now()+1500;
+    try { response = player.getPlayerResponse?.() || (window as any).ytInitialPlayerResponse; tracks = player.getOption?.('captions', 'tracklist'); }
+    catch {response=undefined;tracks=undefined;}
+  }
   let cc: boolean | null = null;
   let unavailable = false;
   if (button) {

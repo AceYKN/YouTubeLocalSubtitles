@@ -69,6 +69,7 @@ chrome.runtime.onMessage.addListener((message, _sender, reply) => {
       current={...current,...message.state};mediaAnchor=current.media_time || 0;anchorTime=performance.now();
       if(socket?.readyState===WebSocket.OPEN) socket.send(JSON.stringify({type:`session.${message.type}`,generation:current.generation}));
     }
+    if(message.type==='position' && socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'session.position',...message.state}));
     if (message.type === 'audio') audio(message);
     return {ok:true};
   };

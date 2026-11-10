@@ -1,6 +1,6 @@
 # YouTubeLocalSubtitles 技术方案
 
-版本：0.1 草案
+版本：0.2.0 开发预览
 
 日期：2026-11-10
 
@@ -15,12 +15,13 @@
 | 平台 | Windows x64 + 当前稳定版 Chrome，Manifest V3 | 优先服务本机使用；最低兼容 Chrome 116，但验收必须记录实际版本 |
 | 扩展开发 | TypeScript、Vite、多入口构建、原生 DOM/CSS | 控件少，避免引入完整页面框架；本地打包全部脚本 |
 | 页面检测 | Content script + 尽量小的 MAIN world 适配脚本 | 页面播放器数据与扩展逻辑隔离；适配层可能随 YouTube 更新 |
-| 页面按钮捕获 | 用户点击后的 `getDisplayMedia` + Chrome 共享选择框 | 避免依赖工具栏；流在页面上下文持有，导航失效需重新获取 |
+| 默认音轨来源 | yt-dlp 解析公开音轨，PyAV 按媒体 PTS 提前解码 | 不采集画面，不等待原视频播放后才识别，不导出登录 Cookie |
+| 兼容按钮采集 | 用户主动选择后的 `getDisplayMedia` + Chrome 共享选择框 | 仅用于明确选择的兼容方式，保留处理延迟说明 |
 | 备用捕获 | 快捷键/扩展 action → `tabCapture` → offscreen document | 通过扩展调用授权启动；不是普通页面按钮的无提示替代品 |
 | 音频处理 | Web Audio API、AudioWorklet、单声道 16kHz PCM16 | 在工作线程处理，避免主线程按块阻塞 |
 | 本机服务 | Python 3.12、FastAPI、Uvicorn、WebSocket、NumPy | 会话控制、PCM 接收、模型调度；单机单活动音频会话 |
 | 语音活动检测 | sherpa-onnx + Silero VAD | 减少静音推理，按语音段提交识别 |
-| 首选 ASR | Qwen3-ASR-0.6B INT8 ONNX，sherpa-onnx CPU | 已有转换模型；先把 GPU 留给翻译，不假定 INT8 自动走 CUDA |
+| 首选 ASR | Qwen3-ASR-0.6B INT8 ONNX，sherpa-onnx CPU 最多 3 线程 | 给浏览器留出 CPU 调度余量，不假定 INT8 自动走 CUDA |
 | ASR 对照 | faster-whisper，small.en INT8 与需要时的 large-v3-turbo GPU 方案 | 在同一测试集比较延迟/质量；不默认同时安装全部模型 |
 | 翻译运行时 | llama.cpp 的 Windows CUDA `llama-server` | 独立进程，本地 HTTP 调用，支持量化模型 |
 | 首选翻译模型 | Qwen3-4B-Instruct-2507，GGUF Q4_K_M 候选 | 使用不输出思考过程的指令模型；准确性和内存须实测，不声称其为专门翻译模型 |
@@ -36,8 +37,11 @@
 ```mermaid
 flowchart LR
     YT[YouTube 页面] --> DET[字幕与播放状态检测]
-    BTN[页面本地字幕按钮] --> PICK[Chrome 共享选择框]
-    PICK --> CAP[页面捕获适配器]
+    BTN[页面本地字幕按钮] --> ROUTE
+    API --> MEDIA[yt-dlp / PyAV 提前读取音轨]
+    MEDIA --> ASR
+    BTN -.兼容方式.-> PICK[Chrome 共享选择框]
+    PICK --> CAP[仅音频捕获适配器]
     KEY[快捷键或扩展操作] --> TC[tabCapture 备用适配器]
     CAP --> PCM[PCM 音频块]
     TC --> PCM
@@ -52,7 +56,8 @@ flowchart LR
     EN --> API
     ZH --> API
     API --> ROUTE
-    ROUTE --> UI[播放器字幕叠加]
+    ROUTE --> CUES[按媒体时间缓存字幕]
+    CUES --> UI[跟随播放器时钟显示]
 ```
 
 - Content script：注入按钮、观察播放器、字幕叠加、持有页面按钮方案的捕获流。
@@ -66,7 +71,15 @@ flowchart LR
 
 ## 3. 捕获方案与权限
 
-### 3.1 页面按钮主路径
+### 3.0 默认音轨预读路径
+
+页面主按钮发送 `source: prefetch` 的会话，不调用媒体捕获 API。服务只接收当前 YouTube videoId，独立解析该公开视频的音轨，再由 PyAV 按音频帧的 PTS/time_base 取得媒体时间并重采样为 16kHz。
+
+每段初始约 4 秒，目标提前准备未来约 20 秒。识别与翻译完成后立即送入前端缓存，不立即显示；前端在 requestVideoFrameCallback 中使用原生视频时间选取 `[media_start, media_end)` 内的字幕。未来字幕等待，过期字幕不闪现，暂停保持原区间，跳转后复用对应缓存。服务缓存最多 64 段，客户端最多 256 段。
+
+当前视频的进度、速率和播放状态通过 `session.position` 更新；这不控制播放器。程序不暂停、回退或改变原视频速率来等待模型。首次准备仍需时间；来源失败时明确提示，不静默降级为画面采集。需登录来源不通过导出浏览器 Cookie 处理。
+
+### 3.1 兼容页面按钮路径
 
 `getDisplayMedia` 必须直接由用户点击触发；不能先等待异步网络健康检查导致瞬时用户激活失效。服务健康状态应提前缓存在界面，捕获后再确认握手。
 
@@ -75,6 +88,8 @@ flowchart LR
 用户可能仍能选到其他页面。使用 Chrome 可用的捕获句柄能力校验当前标签页：目标页面以随机会话标识配置 Capture Handle，选择后检查捕获轨道的 handle/origin，确认其匹配本次目标。具体兼容性属于首个技术验证门槛；不能可靠校验时拒绝含糊的选择并提示使用快捷键的定向 `tabCapture` 路径，不能悄悄转录别的标签页。
 
 没有音频轨道时立即停止所有轨道并提示开启“共享标签页音频”。不得悄悄改成录麦克风。保留 Chrome 停止共享按钮，并监听 `ended` 事件。
+
+0.2.0 已验证：核对 Capture Handle 后停止视频轨道，音频可以继续。因此兼容方式保留音频轨道并立即释放无用画面来源。默认路径则完全不创建这类捕获流。
 
 ### 3.2 备用路径
 
@@ -119,6 +134,8 @@ YouTube IFrame API 文档没有提供满足主站扩展需求的稳定字幕轨�
 
 ## 5. 音频分段与时间
 
+本节的播放音频 PCM 方案只用于兼容方式。默认路径从媒体文件的原始时间戳得到字幕区间，不以音频网络到达时间或识别完成时间代替媒体时间；显示规则见 3.0。
+
 - 捕获音频混为单声道；用有状态重采样器转为 16kHz，不用简单隔点抽样。
 - PCM16 little-endian；每块初始 100ms，每块约 3.2KB 原始音频。
 - 页面消息路径如使用数字数组，记录序列化开销；不能逐采样发送 runtime 消息。
@@ -145,7 +162,7 @@ YouTube IFrame API 文档没有提供满足主站扩展需求的稳定字幕轨�
 
 ### 6.2 翻译
 
-实现 `Translator.translate(text, recent_context)`。默认 llama.cpp + Qwen3-4B-Instruct-2507 GGUF Q4_K_M 候选，GPU offload、上下文初始 4096，单请求生成，输出长度有界。
+实现 `Translator.translate(text, recent_context)`。默认 llama.cpp + Qwen3-4B-Instruct-2507 GGUF Q4_K_M，GPU offload、上下文 2048、CPU 线程 2、批处理 128/64、关闭线程忙等，单请求生成，输出长度有界。
 
 输入为当前英语段及最多前两段上下文；要求只翻译当前段，不重复历史、不加解释、不输出思考过程。字幕属于待翻译数据，不能被当成调用工具或修改运行配置的指令。无工具权限，不下载和执行字幕内容。
 
@@ -170,6 +187,8 @@ FastAPI 默认监听 `127.0.0.1:18765`，翻译进程默认 `127.0.0.1:18766`；
 | --- | --- |
 | `GET /health` | 仅返回版本及 ready/loading/error 等状态，不暴露文件路径和令牌 |
 | `WS /v1/session` | 配对鉴权、会话控制、PCM、识别结果、译文和状态 |
+
+0.2.0 的默认会话带 `source: prefetch`，并区分字幕处理是否允许的 `eligible` 与播放器是否正播放的 `playing`。使用 `session.position` 更新媒体位置。默认不传输捕获 PCM；二进制 PCM 帧仅用于兼容方式。原有不带 source 的客户端按 live 兼容处理。
 
 WebSocket 首个消息必须是带本地配对令牌的 hello，鉴权完成前不创建模型任务、不接收音频；连接超时未鉴权即关闭。核验实际请求 Origin，只允许配对的扩展来源，拒绝网页与空 Origin。CORS 不是 WebSocket 鉴权，不能只靠 CORS 防护。
 
@@ -261,3 +280,5 @@ YouTubeLocalSubtitles/
 - 停止脚本遍历已核验的服务进程树，兼容 Windows 虚拟环境 Python 启动器的子/孙进程结构；不停止用户其他模型服务。
 - 备用快捷键、真实站点异常矩阵及完整非英语检测尚未全部验证，详见验证记录。
 - 扩展 0.1.1 不再把自动字幕元数据当成可用性的充分证据：播放器明确表示不可用且当前字幕模块无轨道时返回 absent；信号矛盾时保持 unknown。单纯关闭 CC 或隐藏控制栏不会覆盖有效字幕轨道。其他视频残留的模块轨道也不能单独证明当前视频有字幕。
+- 0.2.0 默认提前解码音轨，不采集正在播放的页面。生产服务及模型使用较低调度优先级，限制推理线程、模型上下文和批处理，给播放留出资源。
+- 音轨解析使用 mweb 与本地 BgUtils 2.0.2 脚本，提供匿名播放验证。脚本源码固定为提交 `26475e9d3665b972c4aeb83b4dbaafcf64b88438`，下载归档验证 SHA-256，Python 插件固定同版本；按需运行，没有额外常驻服务。Node 缓存通过 XDG_CACHE_HOME 指向项目 cache，未导出日常浏览器 Cookie。参考 [yt-dlp PO Token 指南](https://github.com/yt-dlp/yt-dlp/wiki/Po-Token-Guide) 和 [助手上游说明](https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/2.0.2)。

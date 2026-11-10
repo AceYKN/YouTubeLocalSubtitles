@@ -10,7 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .config import load_config
+from .config import APP_VERSION, load_config
 from .engine import Engine
 from .session import Session
 
@@ -35,11 +35,13 @@ def create_app(config=None, engine=None):
 
     @app.get("/health")
     async def health():
-        return {"version": "0.1.0", "asr": engine.state,
+        return {"version": APP_VERSION, "asr": engine.state,
                 "models_present": engine.present(), "translation": engine.translator.state,
                 "translation_present": engine.translator.present(),
                 "session_metrics": getattr(engine.active, "metrics", None),
-                "receiving_audio": getattr(engine.active, "accepting", False)}
+                "receiving_audio": getattr(engine.active, "accepting", False),
+                "session_source": getattr(engine.active, "source", None),
+                "last_error": getattr(engine, "last_error", None)}
 
     @app.get("/setup", response_class=HTMLResponse)
     async def setup():
@@ -51,7 +53,7 @@ def create_app(config=None, engine=None):
 <h1>YouTube 本地字幕</h1><p>本机服务已启动。模型加载和字幕翻译均在这台电脑运行。</p>
 <ol><li>打开 <code>chrome://extensions</code>，开启开发者模式。</li><li>选择“加载已解压的扩展程序”，选择项目中的 <code>dist</code> 文件夹。</li><li>点击下面按钮完成配对，然后刷新 YouTube 页面。</li></ol>
 <button id="pair">连接 Chrome 扩展</button><p id="result"></p>
-<p>使用：在播放器旁点击“本地字幕”，选择英文、中文或双语。开始时在 Chrome 弹窗选择当前标签页并共享音频。</p>
+<p>使用：在播放器旁点击“本地字幕”，选择英文、中文或双语。默认提前读取当前视频音轨，并按视频时间显示字幕；视频正常播放。兼容采集方式才需要在 Chrome 弹窗中共享标签页音频。</p>
 <script nonce="{nonce}">document.getElementById('pair').onclick=()=>{{const out=document.getElementById('result');if(!globalThis.chrome?.runtime?.sendMessage){{out.textContent='请先在 Chrome 中加载扩展，再刷新本页。';return;}}chrome.runtime.sendMessage({extension},{payload},r=>{{out.textContent=chrome.runtime.lastError?'未找到扩展，请检查 dist 是否已加载并刷新本页。':r?.ok?'配对完成，可以返回 YouTube。':'连接失败，请重试。';}});}};</script></html>'''
         return HTMLResponse(html, headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY",
             "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; frame-ancestors 'none'"})
@@ -75,7 +77,7 @@ def create_app(config=None, engine=None):
                 await websocket.close(code=1008)
                 return
             session = Session(engine, websocket)
-            await websocket.send_json({"type": "hello", "version": "0.1.0"})
+            await websocket.send_json({"type": "hello", "version": APP_VERSION})
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":

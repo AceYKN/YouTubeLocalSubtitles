@@ -8,7 +8,7 @@ $configPath = Join-Path $projectRoot 'config.local.json'
 if (Test-Path -LiteralPath $configPath) { $port = (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json).port }
 $setupUrl = "http://127.0.0.1:$port/setup"
 $healthy = $false
-try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2; $healthy = $health.version -eq '0.1.0' -and $null -ne $health.models_present } catch {}
+try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2; $healthy = $health.version -eq '0.2.0' -and $null -ne $health.models_present } catch {}
 if (-not $healthy) {
     New-Item -ItemType Directory -Path (Join-Path $projectRoot 'logs') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $projectRoot 'runtime') -Force | Out-Null
@@ -17,7 +17,7 @@ if (-not $healthy) {
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         Start-Sleep -Milliseconds 500
         if ($service.HasExited) { throw 'Service stopped unexpectedly. See logs/service.stderr.log.' }
-        try { $health=Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 1; if ($health.version -eq '0.1.0') { $healthy=$true;break } } catch {}
+        try { $health=Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 1; if ($health.version -eq '0.2.0') { $healthy=$true;break } } catch {}
     }
 }
 if (-not $healthy) { throw 'Service did not become ready. Check logs.' }

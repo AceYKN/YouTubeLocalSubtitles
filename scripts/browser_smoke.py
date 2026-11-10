@@ -100,9 +100,12 @@ async def main():
             await mute_test_browser(page)
             report['checks'].append('test_browser_os_mute_verified_before_playback')
             started=time.monotonic()
-            await page.get_by_role('button',name='开始本地字幕',exact=True).click()
+            await page.get_by_text('兼容方式',exact=True).click()
+            await page.get_by_role('button',name='兼容音频采集（字幕有延迟）',exact=True).click()
             await page.get_by_role('button',name='停止本地字幕',exact=True).wait_for(timeout=15000)
             report['checks'].append('page_button_capture')
+            assert await page.locator('#ytls-root').get_attribute('data-video-capture')=='stopped'
+            report['checks'].append('unused_video_track_stopped')
             await page.evaluate('document.querySelector("video").play()')
             await asyncio.sleep(5)
             import httpx

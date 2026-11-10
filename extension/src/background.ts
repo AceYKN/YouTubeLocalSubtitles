@@ -1,13 +1,17 @@
 let creating: Promise<void> | null = null;
+let offscreenReady=false;
 async function offscreen() {
+  if(offscreenReady)return;
   const existing = await chrome.runtime.getContexts({contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]});
-  if (existing.length) return;
+  if (existing.length) {offscreenReady=true;return;}
   if (!creating) creating = chrome.offscreen.createDocument({url: 'offscreen.html', reasons: [chrome.offscreen.Reason.USER_MEDIA], justification: 'Capture the explicitly selected tab and connect to the local subtitle service.'}).finally(() => { creating = null; });
   await creating;
+  offscreenReady=true;
 }
 async function toOffscreen(message: any) {
   await offscreen();
-  return chrome.runtime.sendMessage({...message, target: 'offscreen'});
+  try{return await chrome.runtime.sendMessage({...message, target: 'offscreen'});}
+  catch(error){offscreenReady=false;throw error;}
 }
 async function settings() {
   return chrome.storage.local.get({token: '', port: 18765, mode: 'bilingual'});
@@ -38,7 +42,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (!config.token) throw new Error('请先打开本机设置页连接扩展');
       return toOffscreen({type: 'connect', tabId, config, session: message.session});
     }
-    if (['audio','reset','stop','pause','resume'].includes(message.type)) {
+    if (['audio','reset','stop','pause','resume','position'].includes(message.type)) {
       if (message.type === 'audio' && (!Array.isArray(message.data) || message.data.length > 3200)) throw new Error('Invalid audio');
       return toOffscreen({...message, tabId});
     }
