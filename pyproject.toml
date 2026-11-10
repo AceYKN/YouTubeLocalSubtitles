@@ -1,0 +1,20 @@
+[project]
+name = "youtube-local-subtitles"
+version = "0.1.0"
+description = "Local ASR and translation service for the Chrome subtitle extension"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.162.2", "uvicorn[standard]==0.54.0", "numpy==2.5.4",
+  "sherpa-onnx==2.0.1", "httpx==0.28.1", "soundfile==0.14.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "playwright==1.65.0",
+    "pycaw>=20260927",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
